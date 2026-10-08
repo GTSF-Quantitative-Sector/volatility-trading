@@ -1,0 +1,10 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.massive_cache/
+.polygon_demo_cache/
+data/
+.DS_Store
+.ipynb_checkpoints/
