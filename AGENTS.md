@@ -4,27 +4,29 @@ This repository studies whether the VIX term structure can time SPY exposure and
 
 ## Current milestone
 
-Data ingestion only. Download and store daily bars for the core series:
-
-- `SPY` equity bars
-- `I:VIX` CBOE Volatility Index
-- `I:VIX3M` CBOE 3-Month Volatility Index
-
-Do not add signals, backtests, portfolio rules, or a trading integration until this dataset is reliable. `polygon-api-demo.ipynb` is a reference for Massive endpoints. Production ingestion lives in `data.py` and `main.py`.
+Baseline research, phases 3 and 4 of the outline: monthly SPY allocation backtests driven by Cboe volatility-index ratios from 2010, the benchmarks, predictive regressions, and robustness checks. Refinement (phase 5) and any trading integration wait until these baselines are reviewed. VIX futures are not in the dataset yet.
 
 ## Repository layout
 
-- `main.py` runs the daily core-series download.
-- `data.py` is the Massive HTTP client, bar normalizer, and CSV writer.
+All pipeline code lives in the `vol_trading/` package and uses relative imports. Run it from the repository root with `python -m vol_trading`.
+
+- `vol_trading/main.py` has two commands: `ingest` downloads data, `backtest` builds signals, runs every backtest and statistic, and writes `results/`.
+- `vol_trading/public_data.py` downloads the free Cboe, FRED, and Yahoo history.
+- `vol_trading/data.py` is the Massive HTTP client, bar normalizer, and CSV writer. It now fetches only `SPY`.
+- `vol_trading/signals.py` builds the daily panel and the tenor-pair ratios and z-scores.
+- `vol_trading/backtest.py` is the monthly rebalance engine, the strategy rules, the benchmarks, and the metrics.
+- `vol_trading/stats.py` holds the predictive regressions, out-of-sample R-squared, stress lead/lag table, subperiods, and walk-forward.
+- `notebooks/term_structure_backtest.ipynb` reads `results/` and draws the P&L, drawdown, tenor heatmap, and regression charts. Do not commit it with outputs.
+- `tests/` holds pytest checks for trade timing, z-score windows, costs, metrics, and parsers. Run `python -m pytest`.
+- `polygon-api-demo.ipynb` is a reference for Massive endpoints, not part of the pipeline.
 - `.env` holds the local API key and is never committed. Copy `.env.example`.
-- `data/raw/` holds downloaded CSVs and is never committed.
-- `.massive_cache/` is the local HTTP cache and is never committed.
+- `data/raw/`, `results/`, and `.massive_cache/` are generated and never committed.
 
 ## Secrets and API access
 
 Put the key in `.env` as `MASSIVE_API_KEY`. `POLYGON_API_KEY` is accepted only as a fallback because Massive was formerly Polygon. The client sends the key in the `Authorization: Bearer` header. It strips `apiKey` query parameters and does not cache them.
 
-Never print, log, commit, or paste the key or licensed response bodies into docs, notebooks, issues, or chat. Indices require a Massive entitlement. A `403` means the key cannot read that endpoint; do not work around it by embedding another credential.
+Never print, log, commit, or paste the key or licensed response bodies into docs, notebooks, issues, or chat. Indices require a Massive entitlement, and the current key gets `403` for `I:VIX` and `I:VIX3M`. Do not work around a `403` by embedding another credential; the public Cboe files below need none.
 
 Useful overrides, all optional:
 
@@ -32,32 +34,48 @@ Useful overrides, all optional:
 - `MASSIVE_CACHE_DIR` defaults to `.massive_cache`.
 - `MASSIVE_CACHE_MODE` is `auto`, `live`, or `cache`. The CLI default is `auto`.
 
-## Data conventions
+## Data sources
 
-The default window starts on `2023-02-14`, the first date Massive documents for index aggregates, and ends on the current America/New_York date. SPY history on Massive is longer, but the aligned core download uses the shared start so VIX and VIX3M are not silently empty. The outline's 2010-onward study needs an additional historical source later. Do not backfill or fabricate that history from the Massive responses.
+The backtest uses only free public files, saved to `data/raw/` and reused unless `ingest --refresh` is passed:
 
-Daily bars come from `GET /v2/aggs/ticker/{ticker}/range/1/day/{start}/{end}`. SPY uses `adjusted=true`, which adjusts splits, not dividends. It is not a total-return series. Index requests omit `adjusted` because that parameter is not part of the index aggregate endpoint. Timestamps are Unix milliseconds converted to America/New_York. Missing index volume stays missing; do not fill it with zero.
+| File | Source | History |
+| --- | --- | --- |
+| `cboe_VIX9D.csv` | Cboe `VIX9D_History.csv` | 2011-01-04 |
+| `cboe_VIX.csv` | Cboe `VIX_History.csv` | 1990 |
+| `cboe_VIX3M.csv` | Cboe `VIX3M_History.csv` | 2009-09-18 |
+| `cboe_VIX6M.csv` | Cboe `VIX6M_History.csv` | 2008 |
+| `cboe_VIX1Y.csv` | Cboe `VIX1Y_History.csv` | 2007 |
+| `fred_DTB3.csv` | FRED 3-month T-bill yield | 1954 |
+| `yahoo_SPY.csv`, `yahoo_IEF.csv` | `yfinance` close and dividend-adjusted close | 2005 |
 
-Each series is written to its own CSV under the output directory:
+Cboe URLs follow `https://cdn.cboe.com/api/global/us_indices/daily_prices/{SYMBOL}_History.csv`. Zero or negative Cboe prints are placeholders and are dropped. FRED drops connections for some custom `User-Agent` strings, so `public_data.py` keeps the `requests` default and retries. Yahoo rows dated today in New York are dropped because that session is unfinished. Yahoo is an unofficial source; if it breaks, replace it with another total-return series rather than Massive's split-only SPY.
 
-- `SPY.csv`
-- `I_VIX.csv`
-- `I_VIX3M.csv`
+Massive `SPY.csv` is still downloaded by `ingest` for later use, starting `2023-02-14` by default. It is not used by the backtest. Massive bars use `adjusted=true`, which adjusts splits, not dividends. Columns, in order: `timestamp`, `open`, `high`, `low`, `close`, `volume`, `vwap`, `transactions`, `ticker`, with ISO 8601 Eastern timestamps. Cache successful GET responses only; aggregates expire after 5 minutes, reference paths after 12 hours, and snapshots after 30 seconds.
 
-Columns, in order: `timestamp`, `open`, `high`, `low`, `close`, `volume`, `vwap`, `transactions`, `ticker`. Rows are sorted by timestamp, duplicate timestamps keep the last row, and timestamps are ISO 8601 with the Eastern offset. An empty API result still writes the header.
+## Backtest conventions
 
-Cache successful GET responses only. Snapshot and market-status paths expire after 30 seconds, reference and corporate-action paths after 12 hours, and other paths, including aggregates, after 5 minutes. `cache_mode=live` refreshes. `cache_mode=cache` fails when no cached response exists.
+- The panel is indexed by SPY trading days. Volatility indexes, IEF, and the T-bill yield are forward-filled by at most one day. Cboe holiday prints on days SPY did not trade are dropped.
+- Tenors are `9D`, `1M` (VIX), `3M`, `6M`, and `12M`. A pair `long/short` is the longer index over the shorter, for all 10 combinations. The main pair is `3M/1M`, the outline's `VIX3M / VIX`.
+- Z-scores use a trailing 252-day window ending on the signal day.
+- Signals are read at the last trading day of each completed month and traded at the next session's close. VIX closes at 4:15 pm and SPY at 4:00 pm, so same-close trading would be look-ahead. A trade day's return accrues to the old weights.
+- Cash earns the prior day's DTB3 yield, accrued per calendar day on a 360-day year. Costs are 5 basis points per unit of SPY plus IEF turnover by default, with 0, 5, and 10 reported.
+- Rules: `binary` holds SPY when the ratio is above 1; `bands` holds 0, 0.5, or 1 below 0.95, between 0.95 and 1.05, and above 1.05; `zscore` holds 1 at z of 0 or higher, 0.5 from -1 to 0, and 0 below -1.
+- Benchmarks: SPY buy-and-hold, 60/40 SPY/IEF rebalanced monthly, SPY when VIX is below 20, and SPY sized to 15% volatility from 21-day realized volatility, capped at 1.
+- The headline run starts at the first month end with the `3M/1M` z-score, 2010-09-30. The tenor grid starts at the first month end with every pair's z-score, 2012-01-31. Do not compare Sharpe ratios across those two windows.
+- Regressions use daily overlapping forward windows, standardized regressors, and Newey-West errors with lags equal to the horizon. Out-of-sample forecasts at month end train only on days whose forward window had closed.
 
-## Run ingestion
+## Run
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+conda activate vol-trading
 pip install -r requirements.txt
 cp .env.example .env
-python main.py
-python main.py --start 2024-01-01 --end 2024-12-31 --output-dir data/raw
+python -m vol_trading ingest
+python -m vol_trading backtest
+python -m pytest
 ```
+
+`ingest --skip-massive` skips the Massive download. If the Massive key is missing or rejected, `ingest` prints a warning and still succeeds because the backtest does not need it.
 
 ## Strategy hypothesis
 
@@ -100,4 +118,8 @@ Report CAGR, Sharpe, Sortino, maximum drawdown, Calmar, annualized volatility, t
 
 ## Later data, not this milestone
 
-Phase 2 still needs SPY total return, VIX futures, a risk-free series, and benchmark assets such as the 60/40 mix. VIX futures use Massive's futures aggregate endpoint and need explicit roll rules before any continuous series is built. Flat files, not repeated REST pagination, are the intended route for large intraday backtests. Portfolio-manager and shared-backtester integration waits until the signal and execution assumptions are specified.
+VIX futures are still missing. They use Massive's futures aggregate endpoint and need explicit roll rules before any continuous series is built.
+
+Rebuilding the curve from Massive SPY options is not planned. Options day aggregates start 2014-06-02, so they cannot cover 2010 to 2013. They hold closing trades rather than bid-ask midpoints, and quotes start only in 2022. Per-contract REST would take millions of requests, so any rebuild would need flat files and separate S3 credentials. SPY options are American and carry dividends, so the result would not match the published indexes. Treat such a rebuild only as a cross-check.
+
+Portfolio-manager and shared-backtester integration waits until the signal and execution assumptions are specified.

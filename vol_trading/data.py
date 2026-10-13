@@ -1,4 +1,7 @@
-"""Massive REST ingestion for the core daily volatility-trading series.
+"""Massive REST ingestion for daily SPY bars.
+
+Massive returns 403 for I:VIX and I:VIX3M on this key, so volatility indexes come
+from the free Cboe files in public_data.py.
 
 The client follows the notebook's direct HTTP pattern: header authentication,
 credential-safe caching, pagination, and normalized aggregate bars.
@@ -20,7 +23,7 @@ import requests_cache
 from dotenv import load_dotenv
 
 INDEX_HISTORY_START = date(2023, 2, 14)
-CORE_TICKERS = ("SPY", "I:VIX", "I:VIX3M")
+CORE_TICKERS = ("SPY",)
 EASTERN = ZoneInfo("America/New_York")
 REQUEST_TIMEOUT = 25
 MAX_PAGES = 100
@@ -65,7 +68,7 @@ class IngestResult:
 
 
 def project_root() -> Path:
-    return Path(__file__).resolve().parent
+    return Path(__file__).resolve().parent.parent
 
 
 def load_project_env() -> None:
@@ -332,7 +335,7 @@ def ingest_core_daily(
     end: date | str | None = None,
     client: MassiveClient | None = None,
 ) -> list[IngestResult]:
-    """Download daily SPY, VIX, and VIX3M bars and write one CSV per series."""
+    """Download daily Massive bars for CORE_TICKERS and write one CSV per series."""
     end_value = market_today() if end is None else date.fromisoformat(_date_text(end))
     start_value = date.fromisoformat(_date_text(start))
     if start_value > end_value:
